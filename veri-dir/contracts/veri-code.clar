@@ -1,5 +1,5 @@
-;; Crypto Alpha Hunters Protocol - Version 2
-;; Time-locked alpha releases with enhanced tracking
+;; Crypto Alpha Hunters Protocol - Version 3
+;; A blockchain-based system for discovering, verifying and rewarding valuable market alpha
 
 ;; Constants
 (define-constant ERR-UNAUTHORIZED-ACCESS (err u1))
@@ -10,6 +10,8 @@
 (define-constant ERR-TIME-LOCK-ACTIVE (err u6))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u7))
 (define-constant ERR-BAD-INPUT (err u8))
+(define-constant ERR-DUPLICATE-ALPHA (err u9))
+(define-constant MAX-ALPHA-ID u100) ;; Maximum allowed alpha identification number
 
 ;; Data Variables
 (define-data-var network-operator principal tx-sender)
@@ -36,7 +38,7 @@
     principal
     {
         latest-alpha: uint,
-        confirmed-alphas: (list 15 uint),
+        confirmed-alphas: (list 20 uint),
         last-hunt: uint,
         total-confirmed: uint
     }
@@ -49,6 +51,12 @@
         tries: uint,
         confirmed-at: (optional uint)
     }
+)
+
+;; Events
+(define-map confirmation-records
+    uint
+    (list 10 {hunter: principal, timestamp: uint})
 )
 
 ;; Authorization
@@ -82,8 +90,23 @@
     (begin
         (asserts! (is-operator) ERR-UNAUTHORIZED-ACCESS)
         
+        ;; Validate alpha-id is within acceptable range
+        (asserts! (<= alpha-id MAX-ALPHA-ID) ERR-BAD-INPUT)
+        
+        ;; Check if alpha already exists to prevent overwriting
+        (asserts! (is-none (map-get? alpha-database alpha-id)) ERR-DUPLICATE-ALPHA)
+        
         ;; Validate unlock time is in future
         (asserts! (>= unlock-time (var-get latest-block)) ERR-BAD-INPUT)
+        
+        ;; Validate proof hash is not empty
+        (asserts! (> (len proof-hash) u0) ERR-BAD-INPUT)
+        
+        ;; Validate content is not empty
+        (asserts! (> (len content) u0) ERR-BAD-INPUT)
+        
+        ;; Validate bounty is a positive amount
+        (asserts! (> bounty u0) ERR-BAD-INPUT)
         
         ;; Set the alpha data
         (map-set alpha-database alpha-id
@@ -97,6 +120,8 @@
             
         ;; Calculate new reserves safely
         (let ((new-reserves (+ (var-get reward-reserves) bounty)))
+            ;; Make sure the addition doesn't overflow
+            (asserts! (>= new-reserves (var-get reward-reserves)) ERR-BAD-INPUT)
             ;; Update the total reserves
             (var-set reward-reserves new-reserves))
         (ok true)))
@@ -143,9 +168,8 @@
                     (merge hunter {
                         latest-alpha: (+ alpha-id u1),
                         confirmed-alphas: (unwrap! (as-max-len? 
-                            (append (get confirmed-alphas hunter) alpha-id) u15)
+                            (append (get confirmed-alphas hunter) alpha-id) u20)
                             ERR-ALPHA-NOT-FOUND),
-                        last-hunt: current-block,
                         total-confirmed: (+ (get total-confirmed hunter) u1)
                     }))
                 
@@ -159,6 +183,16 @@
                 
                 ;; Distribute bounty
                 (try! (stx-transfer? (get bounty alpha) (var-get network-operator) tx-sender))
+                
+                ;; Record success
+                (match (map-get? confirmation-records alpha-id)
+                    records (map-set confirmation-records alpha-id
+                        (unwrap! (as-max-len?
+                            (append records {hunter: tx-sender, timestamp: current-block})
+                            u10)
+                            ERR-ALPHA-NOT-FOUND))
+                    (map-set confirmation-records alpha-id
+                        (list {hunter: tx-sender, timestamp: current-block})))
                 
                 (ok true))
             ERR-INCORRECT-PROOF-HASH)))
@@ -174,8 +208,8 @@
 (define-read-only (get-hunter-profile (hunter principal))
     (map-get? hunter-records hunter))
 
-(define-read-only (get-confirmation-record (alpha-id uint) (hunter principal))
-    (map-get? alpha-confirmations {alpha-id: alpha-id, hunter: hunter}))
+(define-read-only (get-confirmation-history (alpha-id uint))
+    (map-get? confirmation-records alpha-id))
 
 (define-read-only (get-latest-block)
     (var-get latest-block))
